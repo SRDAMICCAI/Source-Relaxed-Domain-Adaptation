@@ -505,25 +505,5 @@ def get_args() -> argparse.Namespace:
 
 
 if __name__ == '__main__':
-
-#    for i in range(0,15):
-
- #       args=argparse.Namespace(augment=False, batch_size=12, bounds_on_fgt=False, bounds_on_train_stats='', cpu=False, csv='metrics.csv', dataset='data/all_transverse', debug=False, dtype='torch.float32', flr=False, grp_regex='Subj_\\d+_\\d+', in_memory=False, l_rate=0.0005, lin_aug_w=False, metric_axis=[1], mix=True, model_weights='results/Inn/JCESource/best_3d.pkl', n_class=2, n_epoch=10, network='ENet', pho=1, power=0.9, resize=0, scheduler='DummyScheduler', scheduler_params='{}', source_folders="[('Inn', png_transform, False), ('GT', gt_transform, True),('WatonInn_pjce', gt_transform, True)]", source_losses="[('CrossEntropy', {'idc': [0,1], 'weights':[1,1]}, None, None, None, 1)]", source_metrics=False, target_dataset='data/all_transverse', target_folders="[('Inn', png_transform, False), ('GT', gt_transform, True),('WatonInn_pjce', gt_transform, True)]", target_losses="[('NaivePenalty', {'idc': [1],'power': 1},'PreciseBoundsOnWeakWTags', {'margin':0.1,'idc':[1], 'power': 1, 'mode':'percentage'},'soft_size',80)]", weight_decay=0.0001, workdir='results/Inn/PWSizeLossNs_jce/')
-    # args = argparse.Namespace(batch_size=4,cpu=False, csv='metrics.csv', dataset='data/all_transverse',
-	# 	    target_dataset='data/all_transverse', mix=True, metric_axis=[1], augment=False,
-    #                           debug=False, dtype='torch.float32', power=0.9,lin_aug_w=False,
-    #                           bounds_on_fgt=False, bounds_on_train_stats='',
-    #                           folders="[('Wat', png_transform, False), ('GT', gt_transform, False),"
-    #                                   "('GT', gt_transform, False)]",flr=False,
-    #                           target_folders="[('Inn', png_transform, False), ('GT', gt_transform, False)]+"
-    #                                          "[('GT', gt_transform, False),('GT', gt_transform, False),('GT', gt_transform, False)]",
-    #                           grp_regex='Subj_\\d+_\\d+', in_memory=False, l_rate=0.0005, weight_decay=1e-4,
-    #                           losses="[('NaivePenalty', {'idc': [1]},'PredictionBoundswTags', "
-    #                           " {'margin':0.1,'idc':[1], 'mode':'percentage','net': 'results/ls_winr2/pred_size40.pkl'} , 'soft_size',1),('SelfEntropy', {'idc': [0,1], 'weights':[1,1]}, None, None, None,0 ),"
-    #                             " ('CEProp', {'fgt':True, 'power': 3}, 'PredictionValues',{'margin':0.1,'mode':'percentage','idc':[1],'sizefile':'results/trainval_size_Inn/ls_winr2_40/trainvalreg_metrics_C2.csv'}, 'norm_soft_size', 1)]",
-    #                           losses_source="[('CrossEntropy', {'idc': [0,1], 'weights':[1,1]}, None, None, None, 1)]",
-    #                           model_weights='results/all_transverse/fse/best_3d.pkl', n_class=2, n_epoch=150, network='ENet', pho=1.0, resize=0,
-	# 		      scheduler='DummyScheduler', scheduler_params='{}', workdir='results/Inn/foo')
-    #
     run(get_args())
-    #    run(args)
+
