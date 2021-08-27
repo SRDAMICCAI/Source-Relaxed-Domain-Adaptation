@@ -535,7 +535,8 @@ class ResidualUNet(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, nin, nout, nG=64):
+    #def __init__(self, nin, nout, nG=64):
+    def __init__(self, nin, nout, nG=32): # m changed the default from 64 to 32
         super().__init__()
 
         self.conv0 = nn.Sequential(convBatch(nin, nG),
