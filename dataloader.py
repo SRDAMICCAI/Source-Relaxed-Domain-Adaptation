@@ -9,25 +9,75 @@ from itertools import repeat
 from functools import partial
 from typing import Any, Callable, BinaryIO, Dict, List, Match, Pattern, Tuple, Union
 import csv
-
+from multiprocessing import cpu_count
 import torch
 import numpy as np
 from torch import Tensor
 from PIL import Image
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-from MySampler import Sampler
 import os
-from utils import id_, map_, class2one_hot, augment
+from MySampler import Sampler
+from utils import id_, map_, class2one_hot, augment, read_nii_image,read_unknownformat_image
 from utils import simplex, sset, one_hot, pad_to, remap
 
 F = Union[Path, BinaryIO]
 D = Union[Image.Image, np.ndarray, Tensor]
 
 
+def nii_transform(resolution: Tuple[float, ...], K: int) -> Callable[[D], Tensor]: 
+        return transforms.Compose([ 
+            lambda nd: ((nd+4) / 8),  # max <= 1 
+            lambda nd: torch.tensor(nd, dtype=torch.float32), 
+                ]) 
+         
+def nii_gt_transform(resolution: Tuple[float, ...], K: int) -> Callable[[D], Tensor]: 
+        return transforms.Compose([ 
+            lambda nd: torch.tensor(nd, dtype=torch.int64) ,  # need to Add one dimension to simulate batch 
+                partial(class2one_hot, K=K), 
+                itemgetter(0),  # Then pop the element to go back to img shape 
+                ])
+
+def dummy_transform(resolution: Tuple[float, ...], K: int) -> Callable[[D], Tensor]:
+        return transforms.Compose([
+            lambda nd: torch.tensor(nd, dtype=torch.int64),
+            lambda t: torch.zeros_like(t),
+                partial(class2one_hot, K=K),
+                itemgetter(0)  # Then pop the element to go back to img shape
+                ])
+            
 def get_loaders(args, data_folder: str, subfolders:str,
                 batch_size: int, n_class: int,
-                debug: bool, in_memory: bool, dtype, shuffle:bool, fix_size: list) -> Tuple[DataLoader, DataLoader]:
+                debug: bool, in_memory: bool, dtype, shuffle:bool, mode:str, val_subfolders:"") -> Tuple[DataLoader, DataLoader]:
+
+    nii_transform2 = transforms.Compose([
+        lambda nd: torch.tensor(nd, dtype=torch.float32),
+        lambda nd: nd[:,0:384,0:384],
+        #lambda nd: print(nd.shape),
+    ])
+
+    nii_gt_transform2 = transforms.Compose([
+        lambda nd: torch.tensor(nd, dtype=torch.int64),
+        partial(class2one_hot, C=n_class),
+        lambda nd: nd[:,:,0:384,0:384],
+        itemgetter(0),
+        #lambda nd: print(nd.shape,"nii gt rtans")
+    ])
+
+
+    nii_transform = transforms.Compose([
+        lambda nd: torch.tensor(nd, dtype=torch.float32),
+        lambda nd: (nd+4) / 8.5,  # max <= 1
+        #lambda nd: print(nd.shape),
+    ])
+
+    nii_gt_transform = transforms.Compose([
+        lambda nd: torch.tensor(nd, dtype=torch.int64),
+        partial(class2one_hot, C=n_class),
+        itemgetter(0),
+        #lambda nd: print(nd.shape,"nii gt rtans")
+    ])
+
     png_transform = transforms.Compose([
         lambda img: np.array(img)[np.newaxis, ...],
         lambda nd: nd / 255,  # max <= 1
@@ -58,18 +108,29 @@ def get_loaders(args, data_folder: str, subfolders:str,
         itemgetter(0)
     ])
     gt_transform = transforms.Compose([
+        #lambda img: np.array(img)[np.newaxis, ...],
+        #lambda nd: np.pad(nd, [(0, 0), (0, 0), (110, 110)], 'constant'),
+        #lambda nd: pad_to(nd, 256, 256),
+        lambda nd: torch.tensor(nd, dtype=torch.int64),
+        #lambda nd: print(nd.shape,"nd in gt transform"),
+        partial(class2one_hot, C=n_class),
+        itemgetter(0),
+    ])
+    gtpng_transform = transforms.Compose([
         lambda img: np.array(img)[np.newaxis, ...],
         #lambda nd: np.pad(nd, [(0, 0), (0, 0), (110, 110)], 'constant'),
         #lambda nd: pad_to(nd, 256, 256),
         lambda nd: torch.tensor(nd, dtype=torch.int64),
+        #lambda nd: print(nd.shape,"nd in gt transform"),
         partial(class2one_hot, C=n_class),
-        itemgetter(0)
+        itemgetter(0),
     ])
 
-    if args.target_losses:
+
+    if mode == "target":
         losses = eval(args.target_losses)
     else:
-        losses = eval(args.losses)
+        losses = eval(args.source_losses)
 
     bounds_generators: List[Callable] = []
     for _, _, bounds_name, bounds_params, fn, _ in losses:
@@ -78,12 +139,14 @@ def get_loaders(args, data_folder: str, subfolders:str,
             continue
         bounds_class = getattr(__import__('bounds'), bounds_name)
         bounds_generators.append(bounds_class(C=args.n_class, fn=fn, **bounds_params))
-
-
     folders_list = eval(subfolders)
+    val_folders_list = eval(subfolders)
+    if val_subfolders !="":
+        val_folders_list = eval(val_subfolders)
+
     # print(folders_list)
     folders, trans, are_hots = zip(*folders_list)
-    #print(args.bounds_on_fgt)
+    valfolders, val_trans, val_are_hots = zip(*val_folders_list)
     # Create partial functions: Easier for readability later (see the difference between train and validation)
     gen_dataset = partial(SliceDataset,
                           transforms=trans,
@@ -91,20 +154,37 @@ def get_loaders(args, data_folder: str, subfolders:str,
                           debug=debug,
                           C=n_class,
                           in_memory=in_memory, augment=args.augment,
-                          bounds_generators=bounds_generators, bounds_on_fgt=args.bounds_on_fgt, bounds_on_train_stats=args.bounds_on_train_stats)
+                          bounds_generators=bounds_generators)
+    valgen_dataset = partial(SliceDataset,
+                          transforms=val_trans,
+                          are_hots=val_are_hots,
+                          debug=debug,
+                          C=n_class,
+                          in_memory=in_memory, augment=args.augment,
+                          bounds_generators=bounds_generators)
+
     data_loader = partial(DataLoader,
-                          num_workers=batch_size+4,
+                          num_workers=4,
+                          #num_workers=min(cpu_count(), batch_size + 4),
+                          #num_workers=1,
                           pin_memory=True)
 
     # Prepare the datasets and dataloaders
     train_folders: List[Path] = [Path(data_folder, "train", f) for f in folders]
+    if args.trainval:
+        train_folders: List[Path] = [Path(data_folder, "trainval", f) for f in folders]
+    elif args.valonly:
+        train_folders: List[Path] = [Path(data_folder, "val", f) for f in folders]
+    #if args.ontrain1:
+    #    train_folders: List[Path] = [Path(data_folder, "train1", f) for f in folders]
     # I assume all files have the same name inside their folder: makes things much easier
     train_names: List[str] = map_(lambda p: str(p.name), train_folders[0].glob("*.png"))
     if len(train_names)==0:
+        train_names: List[str] = map_(lambda p: str(p.name), train_folders[0].glob("*.nii"))
+    if len(train_names)==0:
         train_names: List[str] = map_(lambda p: str(p.name), train_folders[0].glob("*.npy"))
     #train_names.sort()
-    #print(train_names)
-    print("train folders",train_folders)
+    
     train_set = gen_dataset(train_names,
                             train_folders)
     #if fix_size!=[0,0] and len(train_set)<fix_size[0]:
@@ -119,13 +199,25 @@ def get_loaders(args, data_folder: str, subfolders:str,
                                drop_last=False)
 
     #train_loader= torch.utils.data.RandomSampler(data_source, replacement=False, num_samples=None)
-
-    val_folders: List[Path] = [Path(data_folder, "val", f) for f in folders]
+    if args.ontest:
+        print('on test')
+        val_folders: List[Path] = [Path(data_folder, "test", f) for f in valfolders]
+        #print(val_folders)
+    elif args.ontrain:
+        print('on train')
+        val_folders: List[Path] = [Path(data_folder, "train", f) for f in valfolders]
+    else:#/
+        print('on val')
+        val_folders: List[Path] = [Path(data_folder, "val", f) for f in valfolders]
+    #print(val_folders,"(val_folders" )
     val_names: List[str] = map_(lambda p: str(p.name), val_folders[0].glob("*.png"))
     if len(val_names)==0:
+        val_names: List[str] = map_(lambda p: str(p.name), val_folders[0].glob("*.nii"))
+    if len(val_names)==0:
         val_names: List[str] = map_(lambda p: str(p.name), val_folders[0].glob("*.npy"))
+    #print(val_names, "val_names")
     #val_names.sort()
-    val_set = gen_dataset(val_names,
+    val_set = valgen_dataset(val_names,
                           val_folders)
 
     #if fix_size!=[0,0] and len(val_set)<fix_size[1]:
@@ -146,10 +238,11 @@ def get_loaders(args, data_folder: str, subfolders:str,
     return train_loader, val_loader
 
 
+
 class SliceDataset(Dataset):
     def __init__(self, filenames: List[str], folders: List[Path], are_hots: List[bool],
                  bounds_generators: List[Callable], transforms: List[Callable], debug=False,  augment: bool = False,
-                 C=2, in_memory: bool = False, bounds_on_fgt=False, bounds_on_train_stats=False) -> None:
+                 C=2, in_memory: bool = False) -> None:
         self.folders: List[Path] = folders
         self.transforms: List[Callable[[D], Tensor]] = transforms
         assert len(self.transforms) == len(self.folders)
@@ -160,13 +253,13 @@ class SliceDataset(Dataset):
         self.C: int = C  # Number of classes
         self.in_memory: bool = in_memory
         self.bounds_generators: List[Callable] = bounds_generators
-        self.bounds_on_fgt = bounds_on_fgt
-        self.bounds_on_train_stats = bounds_on_train_stats
         self.augment: bool = augment
 
+        #print("self.folders",self.folders)
+        #print("self.filenames[:10]",self.filenames[:10])
         if self.debug:
             self.filenames = self.filenames[:10]
-
+        
         assert self.check_files()  # Make sure all file exists
 
         # Load things in memory if needed
@@ -179,11 +272,15 @@ class SliceDataset(Dataset):
 
     def check_files(self) -> bool:
         for folder in self.folders:
+            #print(folder)
             if not Path(folder).exists():
+                print(folder, "does not exist")
                 return False
 
             for f_n in self.filenames:
+                #print(f_n)
                 if not Path(folder, f_n).exists():
+                    print(folder,f_n, "does not exist")
                     return False
 
         return True
@@ -211,21 +308,35 @@ class SliceDataset(Dataset):
         filename: str = self.filenames[index]
         path_name: Path = Path(filename)
         images: List[D]
-
+        #print('get',self.folders, filename) 
+        files  = SliceDataset.load_images(self.folders, [filename], self.in_memory)
+        #print('files', files, self.bounds_generators)
+        #print('old files', self.files[0][index])
+        #print(self.files, filename)
+        #print(path_name)
         if path_name.suffix == ".png":
             images = [Image.open(files[index]).convert('L') for files in self.files]
+        elif path_name.suffix == ".nii":
+            #print(files)
+            try:
+                images = [read_nii_image(f[0]) for f in files]
+                #print("nm",[i.shape for i in images])
+            except:
+                images = [read_unknownformat_image(f[0]) for f in files]
+                #print("em",[i.shape for i in images])
         elif path_name.suffix == ".npy":
             images = [np.load(files[index]) for files in self.files]
         else:
             raise ValueError(filename)
-
         if self.augment:
             images = augment(*images)
 
+        assert self.check_files()  # Make sure all file exists
         # Final transforms and assertions
         t_tensors: List[Tensor] = [tr(e) for (tr, e) in zip(self.transforms, images)]
 
-        assert 0 <= t_tensors[0].min() and t_tensors[0].max() <= 1  # main image is between 0 and 1
+        assert 0 <= t_tensors[0].min() and t_tensors[0].max() <= 1, t_tensors[0].max()  # main image is between 0 and 1
+        #print(t_tensors[0].max()) 
         _, w, h = t_tensors[0].shape
 
         for ttensor, is_hot in zip(t_tensors[1:], self.are_hots):  # All masks (ground truths) are class encoded
@@ -234,35 +345,11 @@ class SliceDataset(Dataset):
             #assert ttensor.shape == (self.C, w, h)
 
         img, gt = t_tensors[:2]
-        #print(self.bounds_on_train_stats)
-        if self.bounds_on_train_stats:
-            print('dd')
-            num_slice = filename.split('_')[2].split('.')[0]
-            stats = os.listdir(self.bounds_on_train_stats)
-            grouping_regex = re.compile(num_slice + '_stats.csv')
-            matches = map_(grouping_regex.match, stats)
-            slice_bounds = [match.string for match in matches if type(match) != type(None)]
-            with open(self.bounds_on_train_stats+'/'+slice_bounds[0]) as f:
-                reader = csv.reader(f)
-                next(reader)  # skip header
-                dataf = [r for r in reader]
-                min_foreground = float(dataf[1][3])*0.8
-                max_foreground = float(dataf[2][3])*1.2
-
-                #print(float(dataf[0][3]))
-                min_background = 256*36 - max_foreground
-                max_background = 256*36 - min_foreground
-
-            boundsn = Tensor([[min_background,max_background],[min_foreground,max_foreground]])
-            bounds = [torch.zeros((self.C, 1, 2), dtype=torch.float32), boundsn.unsqueeze(1)]
-
-        elif self.bounds_on_fgt:
-            fgt = t_tensors[2]
-            bounds = [f(img, fgt, t, filename) for f, t in zip(self.bounds_generators, t_tensors[2:])]
-            t_tensors.pop(2)
-        else:
+        #print(gt.shape)
+        try:
             bounds = [f(img, gt, t, filename) for f, t in zip(self.bounds_generators, t_tensors[2:])]
-
+        except:
+            print(self.folders, filename, self.bounds_generator)
         # return t_tensors + [filename] + bounds
         return [filename] + t_tensors + bounds
 

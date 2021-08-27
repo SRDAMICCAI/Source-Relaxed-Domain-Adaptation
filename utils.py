@@ -12,7 +12,7 @@ from tqdm import tqdm
 from torch import einsum
 from torch import Tensor
 from functools import partial, reduce
-from skimage.io import imsave
+from skimage.io import imsave,imread
 from PIL import Image, ImageOps
 from scipy.spatial.distance import directed_hausdorff
 import torch.nn as nn
@@ -21,11 +21,11 @@ import torch.nn as nn
 #from pydensecrf.utils import unary_from_softmax
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from viewer import display_item
 from typing import Dict
 from PIL import Image, ImageOps
-
-
+import nibabel as nib
+import warnings
+import re
 
 # functions redefinitions
 tqdm_ = partial(tqdm, ncols=125,
@@ -36,6 +36,96 @@ A = TypeVar("A")
 B = TypeVar("B")
 T = TypeVar("T", Tensor, np.ndarray)
 
+def get_subj_nb(filenames_vec):
+    subj_nb= [int(re.split('(\d+)', x)[1]) for x in filenames_vec]
+    return subj_nb
+
+
+
+def get_weights(list1):
+    if len(list1)==5:
+        m0,m1,m2,m3,m4 = list1
+    elif len(list1)==4:
+        m1,m2,m3,m4 = list1
+        m0 = 256*256 -m1 -m2 -m3 -m4
+        list1 = [m0]+list1
+    elif len(list1)==1:
+        m1 = list1[0]
+        m0 = 256*36 -m1
+        list1 = [m0]+list1
+    inv = [1/m for m in list1]
+    N = np.sum(inv)
+    w_vec = [i/N for i in inv]
+    print(np.sum(w_vec))
+    return np.round(w_vec,2)
+
+
+def Nmaxelements(list1, N):
+    final_list = []
+
+    for i in range(0, N):
+        max1 = 0
+
+        for j in range(len(list1)):
+            if list1[j] > max1:
+                max1 = list1[j];
+
+        list1.remove(max1);
+        final_list.append(max1)
+
+    return(final_list)
+
+def get_optimal_crop(size_in_mr,size_in_ct):
+    a=256*256
+    area = (size_in_mr * a) / size_in_ct
+    length = np.sqrt(area)
+    crop = np.round((256-length)/2,0)
+    return crop
+
+
+def read_anyformat_image(filename):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        #print(filename)
+        #acc = imread(filename)
+
+        if Path(filename).suffix == ".png":
+            acc: np.ndarray = imread(filename)
+        elif Path(filename).suffix == ".npy":
+            acc: np.ndarray = np.load(filename)
+        elif Path(filename).suffix == ".nii":
+            acc: np.ndarray = read_nii_image(filename)
+            acc = np.squeeze(acc)
+    return(acc)
+
+
+def read_unknownformat_image(filename):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        #acc = imread(filename)
+        print(filename)
+        try:
+            if Path(filename).suffix == ".png":
+                acc: np.ndarray = imread(filename)
+            elif Path(filename).suffix == ".npy":
+                acc: np.ndarray = np.load(filename)
+            elif Path(filename).suffix == ".nii":
+                acc: np.ndarray = read_nii_image(filename)
+                #acc = np.squeeze(acc)
+        except:
+            #print('changing extension')
+            filename = os.path.splitext(filename)[0]+".png"
+            acc: np.ndarray = imread(filename)
+            acc = np.expand_dims(acc,0)
+        return(acc)
+
+
+
+
+def read_nii_image(input_fid):
+    """read the nii image data into numpy array"""
+    img = nib.load(str(input_fid))
+    return img.get_data()
 
 def exp_lr_scheduler(optimizer, epoch, lr_decay=0.1, lr_decay_epoch=20):
     """Decay learning rate by a factor of lr_decay every lr_decay_epoch epochs"""
@@ -103,13 +193,14 @@ def soft_size(a: Tensor,power:int) -> Tensor:
 
 def norm_soft_size(a: Tensor, power:int) -> Tensor:
     b, c, w, h = a.shape
+    sl_sz = w*h
     amax = a.max(dim=1, keepdim=True)[0]+1e-10
     #amax = torch.cat(c*[amax], dim=1)
     resp = (torch.div(a,amax))**power
     ress = einsum("bcwh->bc", [resp]).type(torch.float32)
     ress_norm = ress/(torch.sum(ress,dim=1,keepdim=True)+1e-10)
     #print(torch.sum(ress,dim=1))
-    return ress_norm
+    return ress_norm.unsqueeze(2)
 
 
 def batch_soft_size(a: Tensor) -> Tensor:
@@ -197,7 +288,7 @@ def one_hot(t: Tensor, axis=1, dtype=torch.float32) -> bool:
 
 # # Metrics and shitz
 def meta_dice(sum_str: str, label: Tensor, pred: Tensor, smooth: float = 1e-8, dtype=torch.float32):
-    assert label.shape == pred.shape
+    assert label.shape == pred.shape, print(label.shape, pred.shape)
     assert one_hot(label)
     assert one_hot(pred)
 
@@ -282,10 +373,24 @@ def save_images_p(segs: Tensor, names: Iterable[str], root: str, mode: str, iter
         imsave(str(save_path), seg.astype('uint8'))
 
 # Misc utils
-def save_images(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: int, remap: True) -> None:
+def save_be_images(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: int, remap: True) -> None:
     b, w, h = segs.shape  # Since we have the class numbers, we do not need a C axis
 
     for seg, name in zip(segs, names):
+        seg = seg.cpu().numpy()
+        if remap:
+            #assert sset(seg, list(range(2)))
+            seg[seg == 1] = 255
+        save_path = Path(root, "best", name).with_suffix(".png")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        imsave(str(save_path), seg.astype('uint8'))
+
+
+# Misc utils
+def save_images(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: int, remap: True) -> None:
+    b, w, h = segs.shape  # Since we have the class numbers, we do not need a C axis
+    for seg, name in zip(segs, names):
+        #print(root,iter,mode,name)
         seg = seg.cpu().numpy()
         if remap:
             #assert sset(seg, list(range(2)))
@@ -299,10 +404,10 @@ def save_images(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: 
 def save_images_ent(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: int) -> None:
     b, w, h = segs.shape  # Since we have the class numbers, we do not need a C axis
     for seg, name in zip(segs, names):
+        #print(root,iter,mode,name)
         seg = seg.cpu().numpy()*255 #entropy is smaller than 1
         save_path = Path(root, f"iter{iter:03d}", mode, name).with_suffix(".png")
         save_path.parent.mkdir(parents=True, exist_ok=True)
-
         imsave(str(save_path), seg.astype('uint8'))
 
 # Misc utils
@@ -319,8 +424,6 @@ def save_images_inf(segs: Tensor, names: Iterable[str], root: str, mode: str, re
             seg[seg == 1] = 255
         save_path = Path(root, mode, name).with_suffix(".png")
         #save_path = Path(root, mode, name).with_suffix(".npy")
-
-
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         imsave(str(save_path), seg.astype('uint8'))
